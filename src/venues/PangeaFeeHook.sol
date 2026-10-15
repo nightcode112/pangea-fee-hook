@@ -113,7 +113,8 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
     ///      to the next buyer as a maker, fee-free, and the mirror image bought. Every such fill
     ///      was a swap's worth of fee the creator and the platform did not get. Nobody had an
     ///      honest reason to add liquidity either -- a pool with no fee pays its providers
-    ///      nothing -- so only the launch's own seeder may.
+    ///      nothing -- so only the chain's LiquidityLocker may, which adds each launch's slice
+    ///      once and can never take it out.
     uint160 public constant MINED_FLAGS = Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
         | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
         | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG;
@@ -156,10 +157,13 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
 
     mapping(PoolId => Config) public configs;
 
-    /// @notice The one address that may add liquidity to each pool: the seeder its launch made,
-    ///         which adds the slice once and can never take it out.
-    /// @dev Beside `configs` rather than inside it, so a swap still reads one storage slot.
-    mapping(PoolId => address) public seederOf;
+    /// @notice The one address that may add liquidity to any pool this hook serves: this chain's
+    ///         LiquidityLocker, which adds each launch's slice once, as that launch's own
+    ///         position, and has no code that can take it out.
+    /// @dev Immutable, and part of the init code: the locker is deployed before the hook, and
+    ///      nobody can ever name another. It replaced a per-pool `seederOf` the factory wrote at
+    ///      every launch.
+    address public immutable locker;
 
     /// @notice Claims accrued per pool, per currency, waiting to be redeemed into real tokens.
     mapping(PoolId => mapping(Currency => uint256)) public owed;
@@ -193,24 +197,27 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
     error WrongHook(address hooks);
     error PoolFeeNotZero(uint24 fee);
     error FeeOutOfRange(uint16 feeBps);
-    error OnlySeeder(address sender);
+    error OnlyLocker(address sender);
     /// @notice The swap would leave the pool's tick beyond its range's edge, on the side with no
     ///         liquidity. See "THE PRICE NEVER LEAVES THE LAUNCH'S RANGE".
     error OutOfRange(int24 tick, int24 edgeTick);
     /// @notice The pool would open on the empty side of the edge it was registered with.
     error OpensOutOfRange(uint160 sqrtPriceX96, int24 edgeTick);
 
-    constructor(address poolManager_, address deployer_, address devBuyer_) {
+    constructor(address poolManager_, address deployer_, address devBuyer_, address locker_) {
         // Fail at deployment rather than at the first swap. A hook at an address without the right
         // bits is not a hook v4 will ever call, and finding that out from a pool that silently
         // charges nothing is far worse than a failed deploy.
         uint160 flags = uint160(address(this)) & Hooks.ALL_HOOK_MASK;
         if (flags != MINED_FLAGS) revert WrongFlags(flags, MINED_FLAGS);
 
-        if (poolManager_ == address(0) || deployer_ == address(0) || devBuyer_ == address(0)) revert ZeroAddress();
+        if (
+            poolManager_ == address(0) || deployer_ == address(0) || devBuyer_ == address(0) || locker_ == address(0)
+        ) revert ZeroAddress();
         poolManager = IPoolManager(poolManager_);
         deployer = deployer_;
         devBuyer = devBuyer_;
+        locker = locker_;
     }
 
     /// @notice Name the factory that may register pools. Once.
@@ -231,20 +238,17 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
     ///         its launch's range on the empty side, which no swap may leave the price beyond.
     /// @dev Once only. A pool whose fee destination could be changed later would make "the fee goes
     ///      to the creator" a statement about today rather than about the contract. `edgeTick` is
-    ///      the launch's start tick: the seeder's `tickUpper` with the token as currency1, its
-    ///      `tickLower` as currency0. `beforeInitialize` holds the opening price to it.
+    ///      the launch's start tick: the locked position's `tickUpper` with the token as
+    ///      currency1, its `tickLower` as currency0. `beforeInitialize` holds the opening price to
+    ///      it. Who may add the pool's liquidity is not an argument: it is `locker`, for every pool.
     function register(
         PoolKey calldata key,
-        address seeder,
         address splitter,
         bool quoteIsCurrency0,
         uint16 feeBps,
         int24 edgeTick
     ) external {
         if (msg.sender != factory) revert NotFactory();
-        // The seeder is who may add liquidity; with none named, nobody could, and the launch that
-        // registered this pool would revert at its own seeding.
-        if (seeder == address(0)) revert ZeroAddress();
         // A zero destination would send every fee this pool ever earns to address(0), with no way
         // to recover it and nothing to signal it had happened. Caught here because this is the one
         // place it can enter, rather than trusting each caller to have got it right.
@@ -267,7 +271,6 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
             registered: true,
             edgeTick: edgeTick
         });
-        seederOf[id] = seeder;
         emit Registered(id, splitter, feeBps, quoteIsCurrency0, edgeTick);
     }
 
@@ -464,7 +467,7 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
     /// @dev Refuses a pool the factory has not registered. Opening a v4 pool is permissionless and
     ///      a launch's pool key is computable in advance -- the token address is CREATE2, the rest
     ///      is public -- so without this anyone could open the pool first, at any price, and the
-    ///      seeder's own `initialize` would then revert and take the launch with it. The factory
+    ///      locker's own `initialize` would then revert and take the launch with it. The factory
     ///      registers and seeds in one transaction, so a registered pool that is not yet open is a
     ///      state no stranger ever sees.
     ///
@@ -501,17 +504,19 @@ contract PangeaFeeHook is IHooks, IUnlockCallback {
         revert HookNotImplemented();
     }
 
-    /// @notice Only the pool's own seeder adds liquidity. See `MINED_FLAGS`.
-    /// @dev v4 calls this for a positive liquidity change only; a zero one -- how the seeder
+    /// @notice Only the locker adds liquidity. See `MINED_FLAGS`.
+    /// @dev v4 calls this for a positive liquidity change only; a zero one -- how the locker
     ///      collects -- and a removal go to `beforeRemoveLiquidity`, which this hook does not ask
-    ///      for. Nothing here reads who the pool manager is: an impostor calling this changes
-    ///      nothing, because it changes no state.
-    function beforeAddLiquidity(address sender, PoolKey calldata key, ModifyLiquidityParams calldata, bytes calldata)
+    ///      for. The locker adds to a pool once, for the factory, in the launch that registered
+    ///      it, and a pool cannot open here unregistered (`beforeInitialize`). Nothing here reads
+    ///      who the pool manager is: an impostor calling this changes nothing, because it changes
+    ///      no state.
+    function beforeAddLiquidity(address sender, PoolKey calldata, ModifyLiquidityParams calldata, bytes calldata)
         external
         view
         returns (bytes4)
     {
-        if (sender != seederOf[key.toId()]) revert OnlySeeder(sender);
+        if (sender != locker) revert OnlyLocker(sender);
         return IHooks.beforeAddLiquidity.selector;
     }
 

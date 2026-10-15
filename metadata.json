@@ -21,6 +21,11 @@
             "internalType": "address",
             "name": "devBuyer_",
             "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "locker_",
+            "type": "address"
           }
         ],
         "stateMutability": "nonpayable",
@@ -91,7 +96,7 @@
           }
         ],
         "type": "error",
-        "name": "OnlySeeder"
+        "name": "OnlyLocker"
       },
       {
         "inputs": [
@@ -754,7 +759,7 @@
           },
           {
             "internalType": "struct PoolKey",
-            "name": "key",
+            "name": "",
             "type": "tuple",
             "components": [
               {
@@ -1200,6 +1205,19 @@
         ]
       },
       {
+        "inputs": [],
+        "stateMutability": "view",
+        "type": "function",
+        "name": "locker",
+        "outputs": [
+          {
+            "internalType": "address",
+            "name": "",
+            "type": "address"
+          }
+        ]
+      },
+      {
         "inputs": [
           {
             "internalType": "PoolId",
@@ -1323,11 +1341,6 @@
           },
           {
             "internalType": "address",
-            "name": "seeder",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
             "name": "splitter",
             "type": "address"
           },
@@ -1350,25 +1363,6 @@
         "stateMutability": "nonpayable",
         "type": "function",
         "name": "register"
-      },
-      {
-        "inputs": [
-          {
-            "internalType": "PoolId",
-            "name": "",
-            "type": "bytes32"
-          }
-        ],
-        "stateMutability": "view",
-        "type": "function",
-        "name": "seederOf",
-        "outputs": [
-          {
-            "internalType": "address",
-            "name": "",
-            "type": "address"
-          }
-        ]
       },
       {
         "inputs": [
@@ -1423,10 +1417,10 @@
           }
         },
         "beforeAddLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),bytes)": {
-          "details": "v4 calls this for a positive liquidity change only; a zero one -- how the seeder      collects -- and a removal go to `beforeRemoveLiquidity`, which this hook does not ask      for. Nothing here reads who the pool manager is: an impostor calling this changes      nothing, because it changes no state."
+          "details": "v4 calls this for a positive liquidity change only; a zero one -- how the locker      collects -- and a removal go to `beforeRemoveLiquidity`, which this hook does not ask      for. The locker adds to a pool once, for the factory, in the launch that registered      it, and a pool cannot open here unregistered (`beforeInitialize`). Nothing here reads      who the pool manager is: an impostor calling this changes nothing, because it changes      no state."
         },
         "beforeInitialize(address,(address,address,uint24,int24,address),uint160)": {
-          "details": "Refuses a pool the factory has not registered. Opening a v4 pool is permissionless and      a launch's pool key is computable in advance -- the token address is CREATE2, the rest      is public -- so without this anyone could open the pool first, at any price, and the      seeder's own `initialize` would then revert and take the launch with it. The factory      registers and seeds in one transaction, so a registered pool that is not yet open is a      state no stranger ever sees.      And the pool must open on its range's side of the edge it was registered with -- one      unit of square-root price under it with the token as currency1, on it as currency0 --      so \"the price never leaves the range\" holds from the first block rather than from the      first trade.",
+          "details": "Refuses a pool the factory has not registered. Opening a v4 pool is permissionless and      a launch's pool key is computable in advance -- the token address is CREATE2, the rest      is public -- so without this anyone could open the pool first, at any price, and the      locker's own `initialize` would then revert and take the launch with it. The factory      registers and seeds in one transaction, so a registered pool that is not yet open is a      state no stranger ever sees.      And the pool must open on its range's side of the edge it was registered with -- one      unit of square-root price under it with the token as currency1, on it as currency0 --      so \"the price never leaves the range\" holds from the first block rather than from the      first trade.",
           "params": {
             "key": "The key for the pool being initialized",
             "sender": "The initial msg.sender for the initialize call",
@@ -1453,8 +1447,8 @@
         "redeem((address,address,uint24,int24,address))": {
           "details": "Permissionless. The destination is whatever was registered for that pool and cannot be      changed, so there is nothing a caller can redirect -- only the timing is theirs. The      same reasoning as `release` on the splitter: a creator should never be waiting on us."
         },
-        "register((address,address,uint24,int24,address),address,address,bool,uint16,int24)": {
-          "details": "Once only. A pool whose fee destination could be changed later would make \"the fee goes      to the creator\" a statement about today rather than about the contract. `edgeTick` is      the launch's start tick: the seeder's `tickUpper` with the token as currency1, its      `tickLower` as currency0. `beforeInitialize` holds the opening price to it."
+        "register((address,address,uint24,int24,address),address,bool,uint16,int24)": {
+          "details": "Once only. A pool whose fee destination could be changed later would make \"the fee goes      to the creator\" a statement about today rather than about the contract. `edgeTick` is      the launch's start tick: the locked position's `tickUpper` with the token as      currency1, its `tickLower` as currency0. `beforeInitialize` holds the opening price to      it. Who may add the pool's liquidity is not an argument: it is `locker`, for every pool."
         },
         "unlockCallback(bytes)": {
           "params": {
@@ -1480,7 +1474,7 @@
           "notice": "The hook called after a swap"
         },
         "beforeAddLiquidity(address,(address,address,uint24,int24,address),(int24,int24,int256,bytes32),bytes)": {
-          "notice": "Only the pool's own seeder adds liquidity. See `MINED_FLAGS`."
+          "notice": "Only the locker adds liquidity. See `MINED_FLAGS`."
         },
         "beforeInitialize(address,(address,address,uint24,int24,address),uint160)": {
           "notice": "The hook called before the state of a pool is initialized"
@@ -1497,17 +1491,17 @@
         "factory()": {
           "notice": "Who may register a pool. The launch factory, mid-launch."
         },
+        "locker()": {
+          "notice": "The one address that may add liquidity to any pool this hook serves: this chain's         LiquidityLocker, which adds each launch's slice once, as that launch's own         position, and has no code that can take it out."
+        },
         "owed(bytes32,address)": {
           "notice": "Claims accrued per pool, per currency, waiting to be redeemed into real tokens."
         },
         "redeem((address,address,uint24,int24,address))": {
           "notice": "Turn a pool's accrued claims into real tokens, sent to its splitter."
         },
-        "register((address,address,uint24,int24,address),address,address,bool,uint16,int24)": {
+        "register((address,address,uint24,int24,address),address,bool,uint16,int24)": {
           "notice": "Record where a pool's fees go, which of its currencies is the money, and the edge of         its launch's range on the empty side, which no swap may leave the price beyond."
-        },
-        "seederOf(bytes32)": {
-          "notice": "The one address that may add liquidity to each pool: the seeder its launch made,         which adds the slice once and can never take it out."
         },
         "setFactory(address)": {
           "notice": "Name the factory that may register pools. Once."
@@ -1759,10 +1753,10 @@
       "license": "MIT"
     },
     "src/venues/PangeaFeeHook.sol": {
-      "keccak256": "0x094edeff508a43676f710764a88a762ca448ea33d8630f7cbf4716f3e7c7b8bc",
+      "keccak256": "0x0b1f4cb8c4e934989384dfbe39e0c1a729540115f30ebe76054d99a08479f744",
       "urls": [
-        "bzz-raw://c0f42925260c02e4822cf48271d7a42f9e71dbfc410673e231c113c19ffa7259",
-        "dweb:/ipfs/QmZcL8eZnCdCndMXgBC9oEczDf5yJiA9hibQCadue7JKoh"
+        "bzz-raw://d30f4bbf0a9506046e4df8d27f71666ecd032deedba2d58e0e663723819b1215",
+        "dweb:/ipfs/QmVb3RpifDCjrgRooVx1dVAC4Hje5zGt4zXPY3MqhB6JMu"
       ],
       "license": "UNLICENSED"
     }
